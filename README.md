@@ -74,12 +74,20 @@ Select a test plan:
   5  Battery stress test only: checks, SSD test, then battery stress test to 10% (no burn-in)
   6  Checks and hands-on tests only (no burn-in)
   7  Custom: select each test
+  8  Drain the battery to empty, fast (no other tests; for a new battery's first full cycle)
   q  Quit
 ```
 
 **Battery plans (4 and 5):** keep the charger connected until the script asks you to disconnect it.
 In plan 4 the burn-in runs on the charger first (1 hour); then the script beeps and asks.
 In plan 5 the script asks after the SSD test (a few minutes). Charge the battery to 100% before you start plan 5.
+
+**Drain (plan 8, or `--drain`):** the script reads the battery data, then runs full CPU and GPU load on battery
+at once, until macOS turns the Mac off. Turn the screen brightness to maximum for a faster drain.
+Then connect the charger, charge to 100% without a stop, start the Mac and run the script again.
+The script adds the result to the drain report: PASS if the battery went down to 5% or less,
+FAIL if the Mac shut down above 5% or the charge fell suddenly. Do not leave the battery empty: charge it soon.
+A good use: a new replacement battery's first full cycle, before the battery test (plan 5).
 
 **Custom** asks for each setting: hands-on tests yes or no, burn-in minutes, SSD test size, and the battery test.
 Before the test starts, the script shows the plan and the same plan as a command (for the options below).
@@ -96,6 +104,7 @@ bash mac-burnin.command --auto              # no questions: automatic checks + S
 bash mac-burnin.command --skip-burnin       # checks + hands-on only
 bash mac-burnin.command --battery-rundown 30  # after burn-in, run on battery down to 30 % (light load)
 bash mac-burnin.command --battery-stress 10   # after burn-in, run on battery down to 10 % at full CPU + GPU load
+bash mac-burnin.command --drain             # drain the battery to empty at full load, no other tests
 bash mac-burnin.command --ssd-gb 16         # bigger SSD data test
 ```
 

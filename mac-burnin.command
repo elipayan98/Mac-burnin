@@ -42,6 +42,8 @@
 #                           light load (2 CPU threads)
 #    --battery-stress [P]   Same, but at full CPU and GPU load (finds weak batteries
 #                           that shut down early under heavy current)
+#    --drain                Drain the battery to empty at full load, at once, with no
+#                           other tests (for example, a new battery's first full cycle)
 #
 #  OUTPUT
 #    ~/Desktop/MacBurnIn/<serial>_<date>/  report.html, report.txt,
@@ -77,6 +79,7 @@ SSD_GB=8
 RUNDOWN=0
 RUNDOWN_PCT=30
 RUNDOWN_FULL=0
+DRAIN=0
 SAMPLE_SEC=30
 VERIFY_EVERY_SEC=1800
 
@@ -130,6 +133,9 @@ Usage: bash mac-burnin.command [options]
                          (default: 30) with a light load (2 CPU threads)
   --battery-stress [P]   Same, but with full CPU and GPU load. This finds weak
                          batteries that shut down early under heavy current.
+  --drain                Drain the battery to empty at full load, at once, with
+                         no other tests. Run the script again after the Mac
+                         turns off: it adds the result to the report.
   --help                 Show this text
 
 Without options, the script shows a menu of test plans.
@@ -153,6 +159,8 @@ while [ $# -gt 0 ]; do
     --ssd-gb)
       is_int "${2:-}" || { echo "--ssd-gb needs a whole number."; exit 2; }
       SSD_GB=$2; shift 2;;
+    --drain)
+      DRAIN=1; AUTO=1; SKIP_BURNIN=1; RUNDOWN=1; RUNDOWN_FULL=1; RUNDOWN_PCT=0; shift;;
     --battery-rundown|--battery-stress)
       RUNDOWN=1
       [ "$1" = "--battery-stress" ] && RUNDOWN_FULL=1
@@ -287,8 +295,12 @@ ask_num() {
 
 # --- Start menu ----------------------------------------------------------------
 plan_text() {
-  local p=""
-  [ "$AUTO" = 0 ] && p="hands-on tests, "
+  if [ "$DRAIN" = 1 ]; then
+    printf '%s' "battery check, then drain the battery to empty at full CPU and GPU load (no other tests)"
+    return
+  fi
+  local p="automatic checks, "
+  [ "$AUTO" = 0 ] && p="${p}hands-on tests, "
   p="${p}SSD test ($SSD_GB GB)"
   [ "$SKIP_BURNIN" = 0 ] && p="$p, $(fmt_dur $(( BURN_MIN * 60 ))) burn-in"
   if [ "$RUNDOWN" = 1 ] && [ "$RUNDOWN_FULL" = 1 ]; then
@@ -301,6 +313,7 @@ plan_text() {
 
 plan_args() {
   local a=""
+  if [ "$DRAIN" = 1 ]; then printf '%s' " --drain"; return; fi
   [ "$AUTO" = 1 ] && a="$a --auto"
   if [ "$SKIP_BURNIN" = 1 ]; then a="$a --skip-burnin"
   elif [ $(( BURN_MIN % 60 )) -eq 0 ]; then a="$a --hours $(( BURN_MIN / 60 ))"
@@ -333,7 +346,7 @@ custom_menu() {
 start_menu() {
   local c
   while :; do
-    AUTO=0; SKIP_BURNIN=0; BURN_MIN=240; SSD_GB=8; RUNDOWN=0; RUNDOWN_FULL=0; RUNDOWN_PCT=30
+    AUTO=0; SKIP_BURNIN=0; BURN_MIN=240; SSD_GB=8; RUNDOWN=0; RUNDOWN_FULL=0; RUNDOWN_PCT=30; DRAIN=0
     printf '\n%sSelect a test plan:%s\n' "$BOLD" "$RST"
     printf '  1  Full test: checks, hands-on tests, SSD test, 4-hour burn-in (recommended)\n'
     printf '  2  Quick test: checks, hands-on tests, SSD test, 30-minute burn-in\n'
@@ -342,6 +355,7 @@ start_menu() {
     printf '  5  Battery stress test only: checks, SSD test, then battery stress test to 10%% (no burn-in)\n'
     printf '  6  Checks and hands-on tests only (no burn-in)\n'
     printf '  7  Custom: select each test\n'
+    printf '  8  Drain the battery to empty, fast (no other tests; for a new battery'"'"'s first full cycle)\n'
     printf '  q  Quit\n'
     printf 'Type a number and push Return [1] > '
     read -r c || c=q
@@ -354,11 +368,15 @@ start_menu() {
       5) AUTO=1; SKIP_BURNIN=1; RUNDOWN=1; RUNDOWN_FULL=1; RUNDOWN_PCT=10;;
       6) SKIP_BURNIN=1;;
       7) custom_menu;;
+      8) DRAIN=1; AUTO=1; SKIP_BURNIN=1; RUNDOWN=1; RUNDOWN_FULL=1; RUNDOWN_PCT=0;;
       q|Q) echo "No test started."; exit 0;;
-      *) echo "  Type a number from 1 to 7, or q."; continue;;
+      *) echo "  Type a number from 1 to 8, or q."; continue;;
     esac
-    printf '\n%sPlan:%s automatic checks, %s.\n' "$BOLD" "$RST" "$(plan_text)"
-    if [ "$RUNDOWN" = 1 ] && [ "$SKIP_BURNIN" = 0 ]; then
+    printf '\n%sPlan:%s %s.\n' "$BOLD" "$RST" "$(plan_text)"
+    if [ "$DRAIN" = 1 ]; then
+      printf '  Disconnect the charger when the script asks. The Mac runs until macOS turns it off (about 1 to 2 hours).\n'
+      printf '  Then connect the charger, charge to 100%% without a stop, and run the script again: it adds the result to the report.\n'
+    elif [ "$RUNDOWN" = 1 ] && [ "$SKIP_BURNIN" = 0 ]; then
       printf '  Keep the charger connected during the burn-in. After the burn-in, the script asks you to disconnect it.\n'
       printf '  Then the battery test starts.\n'
     elif [ "$RUNDOWN" = 1 ]; then
@@ -638,7 +656,11 @@ check_battery() {
   if [ "$chg" = "Yes" ] || on_ac; then
     record INFO "Battery" "Charger" "Connected${watt:+, $watt W}"
   else
-    record WARN "Battery" "Charger" "Not connected. Connect the charger before the burn-in."
+    if [ "$DRAIN" = 1 ]; then
+      record INFO "Battery" "Charger" "Not connected (drain mode)"
+    else
+      record WARN "Battery" "Charger" "Not connected. Connect the charger before the burn-in."
+    fi
   fi
 
   lpm="$(pmset -g 2>/dev/null | awk '/lowpowermode/ { print $2; exit }')"
@@ -1416,15 +1438,23 @@ burnin() {
 }
 
 battery_rundown() {
-  local t0 el=0 line rc why="" tname="Run-down test" load_desc="2 CPU threads busy" b0
+  local t0 el=0 line rc why="" tname="Run-down test" load_desc="2 CPU threads busy" b0 ph="battery"
   [ "$RUNDOWN_FULL" = 1 ] && tname="Run-down test (full load)"
+  [ "$DRAIN" = 1 ] && { tname="Drain to empty"; ph="drain"; }
   b0="$(pmset -g batt 2>/dev/null | grep -Eo '[0-9]+%' | head -1 | tr -d '%')"
   if is_int "$b0" && [ "$b0" -le $(( RUNDOWN_PCT + 5 )) ]; then
     record SKIP "Battery" "$tname" "The battery is at $b0%, too close to the $RUNDOWN_PCT% end point. Charge it, then run the battery test again."
     return
   fi
   printf '\a'
-  if [ "$RUNDOWN_FULL" = 1 ]; then
+  if [ "$DRAIN" = 1 ]; then
+    load_desc="full CPU and GPU load"
+    step "Drain the battery to empty (full CPU and GPU load)"
+    msg "Disconnect the charger now (if it is connected). The Mac runs full load until macOS turns it off."
+    msg "For a faster drain, turn the screen brightness to maximum."
+    msg "When the Mac is off: connect the charger, charge to 100% without a stop, start the Mac and run the script again."
+    msg "The script then adds the result to this report. A shutdown above 5% is a battery FAIL."
+  elif [ "$RUNDOWN_FULL" = 1 ]; then
     tname="Run-down test (full load)"
     load_desc="full CPU and GPU load"
     step "Battery stress run-down at full load (down to $RUNDOWN_PCT%)"
@@ -1434,13 +1464,13 @@ battery_rundown() {
     step "Battery run-down (down to $RUNDOWN_PCT%)"
     msg "Disconnect the charger now. The Mac runs a light load on battery."
   fi
-  if is_int "$b0" && [ "$b0" -lt 90 ]; then
+  if [ "$DRAIN" = 0 ] && is_int "$b0" && [ "$b0" -lt 90 ]; then
     warnmsg "The battery is at $b0%. The test still works, but a start near 100% gives a better result."
   fi
   msg "Type s and push Return to skip this test."
   wait_power 0 300; rc=$?
   if [ $rc -ne 0 ]; then record SKIP "Battery" "$tname" "The charger stayed connected"; return; fi
-  set_state battery
+  set_state "$ph"
   IN_BURNIN=1; STOP_REQUESTED=0
   if [ "$RUNDOWN_FULL" = 1 ]; then
     start_load "$NCPU"
@@ -1452,8 +1482,8 @@ battery_rundown() {
   while [ "$STOP_REQUESTED" = 0 ]; do
     sample
     el=$(( $(date +%s) - t0 ))
-    write_sample battery "$el"
-    set_state battery
+    write_sample "$ph" "$el"
+    set_state "$ph"
     printf '\r  %s on battery   battery %s%%   CPU %s°C%s' "$(fmt_dur "$el")" "${S_BATT:-?}" "${S_TEMP:-?}" "$CLR"
     if [ "$S_AC" = 1 ]; then why="charger"; break; fi
     if is_int "$S_BATT" && [ "$S_BATT" -le "$RUNDOWN_PCT" ]; then break; fi
@@ -1468,7 +1498,7 @@ battery_rundown() {
   [ "$RUNDOWN_FULL" = 1 ] && gpu_stop gpu-rundown
   IN_BURNIN=0
   printf '\n'
-  eval "$(phase_stats battery)"
+  eval "$(phase_stats "$ph")"
   local used=$(( ${ST_B0:-0} - ${ST_B1:-0} ))
   local d="$ST_B0% to $ST_B1% in $(fmt_dur "$el")"
   local rate full_h
@@ -1477,6 +1507,9 @@ battery_rundown() {
     record FAIL "Battery" "$tname" "$d. The charge fell from $ST_BFROM% to $ST_BTO% in $(fmt_dur "$ST_BSEC"). A healthy battery falls about 1 to 2% per minute at this load. The battery cannot hold its voltage under load, or its charge counter is wrong: in normal use the Mac can shut down early. If the battery is new, charge it to 100% and run the battery test again: a new battery can need one full cycle to learn its capacity. If the fall comes back, the battery is defective."
   elif [ "$ST_BDROP" -ge 8 ]; then
     record WARN "Battery" "$tname" "$d. The charge fell from $ST_BFROM% to $ST_BTO% between two readings $(fmt_dur "$ST_BSEC") apart: the Mac paused (for example, it slept), so this does not prove a battery fault. Run the battery test again."
+  elif [ "$DRAIN" = 1 ] && [ "$why" = "charger" ] && is_int "$ST_B1" && [ "$ST_B1" -le 5 ]; then
+    # macOS put the Mac to sleep near empty; the tester then connected the charger.
+    record PASS "Battery" "$tname" "The battery ran from $ST_B0% down to $ST_B1%, then macOS stopped the Mac as expected. Next: charge to 100% without a stop, then run the battery test (menu plan 5)."
   elif [ "$why" = "charger" ] || [ "$STOP_REQUESTED" = 1 ]; then
     record WARN "Battery" "$tname" "$d. Stopped before $RUNDOWN_PCT% (charger connected or tester stopped it)."
   elif [ "$used" -gt 0 ] && [ "$el" -gt 0 ]; then
@@ -1533,8 +1566,21 @@ check_previous_run() {
       pl="$(sudo_maybe grep -o 'panic(cpu [0-9]* caller [^"\\]*' "$pf" 2>/dev/null | head -1 | cut -c1-160)"
       detail="$detail Kernel panic report: $(basename "$pf")${pl:+ ($pl)}."
     fi
+    # Drain mode: the shutdown is the expected end. Judge the battery from the samples.
+    if [ "$ST_PHASE" = drain ] && [ "$ST_AC" = 0 ] && is_int "$ST_BATT" && [ -z "$panics" ]; then
+      CSV="$ST_RUN_DIR/samples.csv"
+      eval "$(phase_stats drain)"
+      CSV=""
+      local dd="from ${ST_B0:-?}% down to about ${ST_BATT}% in $(fmt_dur "${ST_E1:-0}") at full load"
+      if [ "${ST_BDROP:-0}" -ge 8 ] && [ "${ST_BSEC:-999}" -le 180 ]; then
+        record FAIL "Battery" "Drain to empty" "The battery ran $dd. The charge fell from $ST_BFROM% to $ST_BTO% in $(fmt_dur "$ST_BSEC"). A healthy battery falls about 1 to 2% per minute at this load. If the battery is new, charge it to 100% and run the battery test (plan 5): if the fall comes back, the battery is defective."
+      elif [ "$ST_BATT" -le 5 ]; then
+        record PASS "Battery" "Drain to empty" "The battery ran $dd, then macOS turned the Mac off at $last_h, as expected. Next: charge to 100% without a stop, then run the battery test (plan 5)."
+      else
+        record FAIL "Battery" "Drain to empty" "The Mac shut down on battery at about ${ST_BATT}% ($dd). The battery cannot give enough power under load. ${code:+Shutdown cause $code ($(cause_text "$code")).}"
+      fi
     # On battery: an almost empty battery explains the shutdown; a shutdown at a higher charge is a battery fault.
-    if [ "$ST_AC" = 0 ] && is_int "$ST_BATT" && [ "$ST_BATT" -le 5 ] && [ -z "$panics" ]; then
+    elif [ "$ST_AC" = 0 ] && is_int "$ST_BATT" && [ "$ST_BATT" -le 5 ] && [ -z "$panics" ]; then
       record WARN "Run" "Battery ran empty" "$detail The battery was almost empty, so this is most likely not a fault. Keep the charger connected during the burn-in."
     else
       record FAIL "Run" "Unexpected restart or shutdown" "$detail"
@@ -2226,10 +2272,20 @@ main() {
 
   printf '\n%s%s%s\n' "$BOLD" "$MODEL_LONG" "$RST"
   msg "Serial $SERIAL, $CPU, $MEM_GB GB, macOS $OS_VER"
-  msg "Plan: automatic checks, $plan."
+  msg "Plan: $plan."
   [ "$AUTO" = 0 ] && msg "Stay at the Mac for the first 15 minutes. After that, the test runs alone."
   msg "Report folder: $RUN_DIR"
-  logmsg "mac-burnin $VERSION started. Options: burn=${BURN_MIN}min auto=$AUTO skip_burnin=$SKIP_BURNIN ssd=${SSD_GB}GB rundown=$RUNDOWN/$RUNDOWN_PCT/full=$RUNDOWN_FULL"
+  logmsg "mac-burnin $VERSION started. Options: burn=${BURN_MIN}min auto=$AUTO skip_burnin=$SKIP_BURNIN ssd=${SSD_GB}GB rundown=$RUNDOWN/$RUNDOWN_PCT/full=$RUNDOWN_FULL drain=$DRAIN"
+
+  # Drain mode: battery check, then drain to empty. Nothing else.
+  if [ "$DRAIN" = 1 ]; then
+    step "Battery check"
+    check_battery
+    save_device
+    battery_rundown
+    finalize "done"
+    return
+  fi
 
   step "1. Automatic checks"
   [ "$HAVE_PM" = 1 ] || record INFO "Run" "Temperature and fan sensors" "Not available (needs the admin password and an Intel Mac)"
