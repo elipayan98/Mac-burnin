@@ -1211,7 +1211,8 @@ phase_stats() { # phase -> shell assignments
       if ($6 != "") { sn++; ss += $6; if (smin == "" || $6 < smin) smin = $6 }
       if ($7 != "") { if (p0 == "") p0 = $7; p1 = $7 }
       if ($8 != "") { if (b0 == "") b0 = $8; b1 = $8; if (bmin == "" || $8 < bmin) bmin = $8
-                      if (pb != "" && pb - $8 > bdrop) bdrop = pb - $8; pb = $8 }
+                      if (pb != "" && pb - $8 > bdrop) { bdrop = pb - $8; bfrom = pb; bto = $8; bsec = $2 - pe }
+                      pb = $8; pe = $2 }
       if ($9 != "") { if (a0 == "") a0 = $9; if (pa == 1 && $9 == 0) drops++; if ($9 == 0) off++; if ($9 == 1) on++; pa = $9 }
       if ($10 != "" && $10 > btmax) btmax = $10
       e1 = $2; if (e0 == "") e0 = $2
@@ -1223,6 +1224,7 @@ phase_stats() { # phase -> shell assignments
       printf "ST_SMIN=%s\nST_SAVG=%s\n", smin, (sn ? sprintf("%.0f", ss / sn) : "")
       printf "ST_PROCHOT=%s\n", ((p0 != "" && p1 != "") ? p1 - p0 : "")
       printf "ST_B0=%s\nST_B1=%s\nST_BMIN=%s\nST_BDROP=%d\n", b0, b1, bmin, bdrop
+      printf "ST_BFROM=%s\nST_BTO=%s\nST_BSEC=%d\n", bfrom, bto, bsec
       printf "ST_AC0=%s\nST_ACDROPS=%d\nST_OFFAC=%d\nST_ONAC=%d\n", a0, drops, off, on
       printf "ST_BTMAX=%s\n", (btmax != "" ? sprintf("%.0f", btmax) : "")
       printf "ST_E0=%s\nST_E1=%s\n", e0, e1
@@ -1470,8 +1472,11 @@ battery_rundown() {
   local used=$(( ${ST_B0:-0} - ${ST_B1:-0} ))
   local d="$ST_B0% to $ST_B1% in $(fmt_dur "$el")"
   local rate full_h
-  if [ "$ST_BDROP" -ge 8 ]; then
-    record FAIL "Battery" "$tname" "$d. The charge fell $ST_BDROP% in one minute. The battery reports its charge wrong and can shut down early."
+  # A sudden fall counts only when the two readings were close in time (normally 1 minute apart).
+  if [ "$ST_BDROP" -ge 8 ] && [ "$ST_BSEC" -le 180 ]; then
+    record FAIL "Battery" "$tname" "$d. The charge fell from $ST_BFROM% to $ST_BTO% in $(fmt_dur "$ST_BSEC"). A healthy battery falls about 1 to 2% per minute at this load. The battery cannot hold its voltage under load: in normal use the Mac can shut down early."
+  elif [ "$ST_BDROP" -ge 8 ]; then
+    record WARN "Battery" "$tname" "$d. The charge fell from $ST_BFROM% to $ST_BTO% between two readings $(fmt_dur "$ST_BSEC") apart: the Mac paused (for example, it slept), so this does not prove a battery fault. Run the battery test again."
   elif [ "$why" = "charger" ] || [ "$STOP_REQUESTED" = 1 ]; then
     record WARN "Battery" "$tname" "$d. Stopped before $RUNDOWN_PCT% (charger connected or tester stopped it)."
   elif [ "$used" -gt 0 ] && [ "$el" -gt 0 ]; then
