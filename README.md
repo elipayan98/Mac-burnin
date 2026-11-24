@@ -69,9 +69,21 @@ bash mac-burnin.command --hours 24          # 1-day burn-in
 bash mac-burnin.command --minutes 30        # short burn-in
 bash mac-burnin.command --auto              # no questions: automatic checks + SSD + burn-in
 bash mac-burnin.command --skip-burnin       # checks + hands-on only
-bash mac-burnin.command --battery-rundown 30  # after burn-in, run on battery down to 30 %
+bash mac-burnin.command --battery-rundown 30  # after burn-in, run on battery down to 30 % (light load)
+bash mac-burnin.command --battery-stress 10   # after burn-in, run on battery down to 10 % at full CPU + GPU load
 bash mac-burnin.command --ssd-gb 16         # bigger SSD data test
 ```
+
+**Heavy SSD and battery test** (no hands-on tests):
+
+```
+bash mac-burnin.command --auto --minutes 60 --ssd-gb 64 --battery-stress 10
+```
+
+When the battery test starts, disconnect the charger. The script waits 5 minutes for that, then skips the test.
+The battery stress test finds weak batteries: under full load, a weak battery makes the Mac shut down early
+(often at 20–40 %). If the Mac shuts down, connect the charger, start the Mac and run the script again.
+It then marks the battery FAIL in the report.
 
 ## How to read the report
 
@@ -93,7 +105,8 @@ with the last battery %, the macOS shutdown cause code and the kernel panic text
 - It cannot see liquid damage, cosmetic damage, or a bad screen coating. You must look.
 - It cannot test RAM directly. Use Apple Diagnostics (hold **D**) for that.
 - The script does not wear the SSD much: it writes 8 GB one time. During the burn-in it only reads.
-- Long burn-ins put heat on the battery. The optional run-down uses one battery cycle. Do not run it on every Mac.
+- Long burn-ins put heat on the battery. Each run-down uses about one battery cycle, and the stress run-down
+  also adds heat. Use them for batteries you doubt (high cycle count, health below about 85 %), not on every Mac.
 - MacBook Air 2018–2020 and MacBook 12-inch throttle under full load by design. The script does not mark that as a fault.
 - On first run, macOS can ask for permission (Desktop folder, camera, microphone, removable volume). Click **OK**.
 - The full-disk SSD read can be blocked by macOS. If the report says so, give Terminal Full Disk Access

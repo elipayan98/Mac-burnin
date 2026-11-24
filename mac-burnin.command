@@ -33,7 +33,10 @@
 #    --auto                 Ask no questions: automatic checks, SSD test, burn-in
 #    --skip-burnin          Do the checks and the hands-on tests only
 #    --ssd-gb N             Size of the SSD test in GB (default 8)
-#    --battery-rundown [P]  After the burn-in, run on battery down to P% (default 30)
+#    --battery-rundown [P]  After the burn-in, run on battery down to P% (default 30),
+#                           light load (2 CPU threads)
+#    --battery-stress [P]   Same, but at full CPU and GPU load (finds weak batteries
+#                           that shut down early under heavy current)
 #
 #  OUTPUT
 #    ~/Desktop/MacBurnIn/<serial>_<date>/  report.html, report.txt,
@@ -68,6 +71,7 @@ SKIP_BURNIN=0
 SSD_GB=8
 RUNDOWN=0
 RUNDOWN_PCT=30
+RUNDOWN_FULL=0
 SAMPLE_SEC=30
 VERIFY_EVERY_SEC=1800
 
@@ -114,7 +118,9 @@ Usage: bash mac-burnin.command [options]
   --skip-burnin          Do the checks and the hands-on tests only.
   --ssd-gb N             Size of the SSD test in GB (default: 8)
   --battery-rundown [P]  After the burn-in, run on battery down to P percent
-                         (default: 30)
+                         (default: 30) with a light load (2 CPU threads)
+  --battery-stress [P]   Same, but with full CPU and GPU load. This finds weak
+                         batteries that shut down early under heavy current.
   --help                 Show this text
 EOF
 }
@@ -132,8 +138,9 @@ while [ $# -gt 0 ]; do
     --ssd-gb)
       is_int "${2:-}" || { echo "--ssd-gb needs a whole number."; exit 2; }
       SSD_GB=$2; shift 2;;
-    --battery-rundown)
+    --battery-rundown|--battery-stress)
       RUNDOWN=1
+      [ "$1" = "--battery-stress" ] && RUNDOWN_FULL=1
       if is_int "${2:-}"; then RUNDOWN_PCT=$2; shift; fi
       shift;;
     -h|--help) usage; exit 0;;
@@ -676,6 +683,9 @@ check_wireless() {
 # --- 2. Hands-on tests ---------------------------------------------------------
 open_page() { open -a Safari "$WORK/$1.html" >/dev/null 2>&1 || open "$WORK/$1.html" >/dev/null 2>&1; }
 
+# Tell a GPU page to stop. The page checks for this file every 5 seconds.
+gpu_stop() { [ -n "$WORK" ] && [ -d "$WORK" ] && printf 'window.__burninStop = true;\n' > "$WORK/stop-$1.js" 2>/dev/null; }
+
 screen_test() {
   step "Screen"
   msg "Safari opens a screen test page."
@@ -1108,6 +1118,7 @@ burnin() {
   done
   alive="$(alive_workers)"
   stop_load
+  gpu_stop gpu
   IN_BURNIN=0
   BURN_DONE=1
   printf '\n'
@@ -1116,7 +1127,7 @@ burnin() {
   eval "$(phase_stats burnin)"
   if [ "$STOP_REQUESTED" = 1 ]; then
     record WARN "Burn-in" "Duration" "Stopped early by the tester after $(fmt_dur "$el") of $(fmt_dur "$total")"
-    warnmsg "Close the Safari GPU page: it keeps running until its own timer ends."
+    note "The Safari GPU page stops by itself in a few seconds. If it still runs after 1 minute, close it."
   else
     record PASS "Burn-in" "Duration" "$(fmt_dur "$el") of full load on $NCPU CPU threads, plus GPU load"
   fi
@@ -1203,15 +1214,28 @@ burnin() {
 }
 
 battery_rundown() {
-  local t0 el=0 line rc why=""
-  step "Battery run-down (down to $RUNDOWN_PCT%)"
-  msg "Disconnect the charger now. The Mac runs a light load on battery."
+  local t0 el=0 line rc why="" tname="Run-down test" load_desc="2 CPU threads busy"
+  if [ "$RUNDOWN_FULL" = 1 ]; then
+    tname="Run-down test (full load)"
+    load_desc="full CPU and GPU load"
+    step "Battery stress run-down at full load (down to $RUNDOWN_PCT%)"
+    msg "Disconnect the charger now. The Mac runs full CPU and GPU load on battery."
+    msg "A weak battery can make the Mac shut down suddenly. If that happens, run the script again: it marks the battery FAIL."
+  else
+    step "Battery run-down (down to $RUNDOWN_PCT%)"
+    msg "Disconnect the charger now. The Mac runs a light load on battery."
+  fi
   msg "Type s and push Return to skip this test."
   wait_power 0 300; rc=$?
-  if [ $rc -ne 0 ]; then record SKIP "Battery" "Run-down test" "The charger stayed connected"; return; fi
+  if [ $rc -ne 0 ]; then record SKIP "Battery" "$tname" "The charger stayed connected"; return; fi
   set_state battery
   IN_BURNIN=1; STOP_REQUESTED=0
-  start_load 2
+  if [ "$RUNDOWN_FULL" = 1 ]; then
+    start_load "$NCPU"
+    open_page gpu-rundown
+  else
+    start_load 2
+  fi
   t0="$(date +%s)"
   while [ "$STOP_REQUESTED" = 0 ]; do
     sample
@@ -1229,19 +1253,23 @@ battery_rundown() {
     fi
   done
   stop_load
+  [ "$RUNDOWN_FULL" = 1 ] && gpu_stop gpu-rundown
   IN_BURNIN=0
   printf '\n'
   eval "$(phase_stats battery)"
   local used=$(( ${ST_B0:-0} - ${ST_B1:-0} ))
   local d="$ST_B0% to $ST_B1% in $(fmt_dur "$el")"
+  local rate full_h
   if [ "$ST_BDROP" -ge 8 ]; then
-    record FAIL "Battery" "Run-down test" "$d. The charge fell $ST_BDROP% in one minute. The battery reports its charge wrong and can shut down early."
+    record FAIL "Battery" "$tname" "$d. The charge fell $ST_BDROP% in one minute. The battery reports its charge wrong and can shut down early."
   elif [ "$why" = "charger" ] || [ "$STOP_REQUESTED" = 1 ]; then
-    record WARN "Battery" "Run-down test" "$d. Stopped before $RUNDOWN_PCT% (charger connected or tester stopped it)."
+    record WARN "Battery" "$tname" "$d. Stopped before $RUNDOWN_PCT% (charger connected or tester stopped it)."
   elif [ "$used" -gt 0 ] && [ "$el" -gt 0 ]; then
-    record PASS "Battery" "Run-down test" "$d (about $(awk -v u="$used" -v s="$el" 'BEGIN { printf "%.1f", u / (s / 3600) }')% per hour with 2 CPU threads busy, screen on)"
+    rate="$(awk -v u="$used" -v s="$el" 'BEGIN { printf "%.1f", u / (s / 3600) }')"
+    full_h="$(awk -v u="$used" -v s="$el" 'BEGIN { printf "%.1f", 100 / (u / (s / 3600)) }')"
+    record PASS "Battery" "$tname" "$d: about $rate% per hour with $load_desc, screen on. A full charge lasts about $full_h hours at this load."
   else
-    record INFO "Battery" "Run-down test" "$d"
+    record INFO "Battery" "$tname" "$d"
   fi
   msg "Connect the charger again."
 }
@@ -1438,6 +1466,8 @@ cleanup() {
   [ -n "$WORK" ] && rm -f "$WORK/ssd-test.bin" "$WORK/chunk.bin" "$WORK"/*.wav 2>/dev/null
   [ -n "$KEEPALIVE_PID" ] && kill "$KEEPALIVE_PID" 2>/dev/null
   [ -n "$CAFF_PID" ] && kill "$CAFF_PID" 2>/dev/null
+  gpu_stop gpu
+  gpu_stop gpu-rundown
 }
 
 on_int() {
@@ -1558,9 +1588,10 @@ button { background:#333; color:#fff; border:0; border-radius:8px; padding:7px 1
 <script>
 (function () {
   'use strict';
-  var CFG = { mode: '__MODE__', mins: parseFloat('__MINS__') };
+  var CFG = { mode: '__MODE__', mins: parseFloat('__MINS__'), stop: '__STOP__' };
   if (CFG.mode.indexOf('__') === 0) { CFG.mode = (location.hash || '#menu').slice(1); }
   if (!(CFG.mins >= 0)) { CFG.mins = 0; }
+  if (CFG.stop.indexOf('__') === 0) { CFG.stop = ''; }
 
   function $(id) { return document.getElementById(id); }
   function show(id) { ['menu', 'screen', 'keys', 'gpu'].forEach(function (s) { $(s).classList.toggle('hide', s !== id); }); }
@@ -1869,14 +1900,27 @@ button { background:#333; color:#fff; border:0; border-radius:8px; padding:7px 1
       frames++;
       fpsN++;
       if (now - fpsT >= 1000) { fps = fpsN * 1000 / (now - fpsT); fpsN = 0; fpsT = now; drawInfo(now); }
-      if (endMs && now - started >= endMs) {
-        finished = true;
-        drawInfo(now);
-        result('ok', '<b>GPU test complete. The GPU did not stop.</b><br>Ran ' + mins(now - started) + ', ' + frames +
-          ' frames. Longest pause: ' + Math.round(maxGap) + ' ms.<br>If you saw lines, blocks or flicker during the test, mark the GPU as failed.');
-        return;
-      }
+      if (endMs && now - started >= endMs) { finish(now); return; }
       requestAnimationFrame(frame);
+    }
+    function finish(now) {
+      if (finished || lost) { return; }
+      finished = true;
+      drawInfo(now);
+      result('ok', '<b>GPU test complete. The GPU did not stop.</b><br>Ran ' + mins(now - started) + ', ' + frames +
+        ' frames. Longest pause: ' + Math.round(maxGap) + ' ms.<br>If you saw lines, blocks or flicker during the test, mark the GPU as failed.');
+    }
+    // The script writes the stop file when its test phase ends. Check for it every 5 seconds.
+    if (CFG.stop) {
+      window.__burninStop = false;
+      setInterval(function () {
+        if (finished || lost) { return; }
+        var s = document.createElement('script');
+        s.src = CFG.stop + '?t=' + Date.now();
+        s.onload = function () { s.parentNode.removeChild(s); if (window.__burninStop) { finish(performance.now()); } };
+        s.onerror = function () { s.parentNode.removeChild(s); };
+        document.head.appendChild(s);
+      }, 5000);
     }
     drawInfo(started);
     requestAnimationFrame(frame);
@@ -1897,10 +1941,14 @@ button { background:#333; color:#fff; border:0; border-radius:8px; padding:7px 1
 </html>
 HTML_EOF
   local m
-  for m in screen keys gpu; do
-    sed -e "s/__MODE__/$m/" -e "s/__MINS__/$BURN_MIN/" "$WORK/page.tpl" > "$WORK/$m.html"
+  for m in screen keys; do
+    sed -e "s/__MODE__/$m/" -e "s/__MINS__/$BURN_MIN/" -e "s/__STOP__//" "$WORK/page.tpl" > "$WORK/$m.html"
   done
-  rm -f "$WORK/page.tpl"
+  # Burn-in GPU page: own timer plus the stop file.
+  sed -e "s/__MODE__/gpu/" -e "s/__MINS__/$BURN_MIN/" -e "s/__STOP__/stop-gpu.js/" "$WORK/page.tpl" > "$WORK/gpu.html"
+  # Battery stress GPU page: stops on the stop file, or after 10 hours at most.
+  sed -e "s/__MODE__/gpu/" -e "s/__MINS__/600/" -e "s/__STOP__/stop-gpu-rundown.js/" "$WORK/page.tpl" > "$WORK/gpu-rundown.html"
+  rm -f "$WORK/page.tpl" "$WORK"/stop-*.js
 }
 
 # --- Main --------------------------------------------------------------------
@@ -1949,7 +1997,11 @@ main() {
   [ "$AUTO" = 0 ] && plan="hands-on tests, "
   plan="${plan}SSD test"
   [ "$SKIP_BURNIN" = 0 ] && plan="$plan, $(fmt_dur $((BURN_MIN * 60))) burn-in"
-  [ "$RUNDOWN" = 1 ] && plan="$plan, battery run-down to $RUNDOWN_PCT%"
+  if [ "$RUNDOWN" = 1 ] && [ "$RUNDOWN_FULL" = 1 ]; then
+    plan="$plan, battery stress run-down at full load to $RUNDOWN_PCT%"
+  elif [ "$RUNDOWN" = 1 ]; then
+    plan="$plan, battery run-down to $RUNDOWN_PCT%"
+  fi
   BURN_PLAN="$plan"
   save_device
   set_state checks
@@ -1960,7 +2012,7 @@ main() {
   msg "Plan: automatic checks, $plan."
   [ "$AUTO" = 0 ] && msg "Stay at the Mac for the first 15 minutes. After that, the test runs alone."
   msg "Report folder: $RUN_DIR"
-  logmsg "mac-burnin $VERSION started. Options: burn=${BURN_MIN}min auto=$AUTO skip_burnin=$SKIP_BURNIN ssd=${SSD_GB}GB rundown=$RUNDOWN/$RUNDOWN_PCT"
+  logmsg "mac-burnin $VERSION started. Options: burn=${BURN_MIN}min auto=$AUTO skip_burnin=$SKIP_BURNIN ssd=${SSD_GB}GB rundown=$RUNDOWN/$RUNDOWN_PCT/full=$RUNDOWN_FULL"
 
   step "1. Automatic checks"
   [ "$HAVE_PM" = 1 ] || record INFO "Run" "Temperature and fan sensors" "Not available (needs the admin password and an Intel Mac)"
@@ -1994,8 +2046,7 @@ main() {
     record SKIP "Burn-in" "Burn-in" "Skipped (--skip-burnin)"
   fi
 
-  [ "$RUNDOWN" = 1 ] && battery_rundown
-
+  # Ask about the GPU page before the battery test: that test opens a new GPU page.
   if [ "$BURN_DONE" = 1 ] && [ "$AUTO" = 0 ]; then
     printf '\a'
     step "GPU page"
@@ -2003,6 +2054,8 @@ main() {
   elif [ "$BURN_DONE" = 1 ]; then
     record INFO "Burn-in" "GPU (visual)" "Not checked (--auto). Look at the Safari GPU page: green = OK, red = GPU fault."
   fi
+
+  [ "$RUNDOWN" = 1 ] && battery_rundown
 
   rm -f "$SSD_FILE" "$WORK/chunk.bin"
   finalize "done"
