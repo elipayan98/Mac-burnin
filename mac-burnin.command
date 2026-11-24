@@ -1474,7 +1474,7 @@ battery_rundown() {
   local rate full_h
   # A sudden fall counts only when the two readings were close in time (normally 1 minute apart).
   if [ "$ST_BDROP" -ge 8 ] && [ "$ST_BSEC" -le 180 ]; then
-    record FAIL "Battery" "$tname" "$d. The charge fell from $ST_BFROM% to $ST_BTO% in $(fmt_dur "$ST_BSEC"). A healthy battery falls about 1 to 2% per minute at this load. The battery cannot hold its voltage under load: in normal use the Mac can shut down early."
+    record FAIL "Battery" "$tname" "$d. The charge fell from $ST_BFROM% to $ST_BTO% in $(fmt_dur "$ST_BSEC"). A healthy battery falls about 1 to 2% per minute at this load. The battery cannot hold its voltage under load, or its charge counter is wrong: in normal use the Mac can shut down early. If the battery is new, charge it to 100% and run the battery test again: a new battery can need one full cycle to learn its capacity. If the fall comes back, the battery is defective."
   elif [ "$ST_BDROP" -ge 8 ]; then
     record WARN "Battery" "$tname" "$d. The charge fell from $ST_BFROM% to $ST_BTO% between two readings $(fmt_dur "$ST_BSEC") apart: the Mac paused (for example, it slept), so this does not prove a battery fault. Run the battery test again."
   elif [ "$why" = "charger" ] || [ "$STOP_REQUESTED" = 1 ]; then
