@@ -96,6 +96,10 @@ CSV=""
 WORK=""
 SSD_FILE=""
 SSD_CHUNKS=0
+SSD_REF=""
+SSD_BAD=0
+SSD_UNCHECKED=0
+VERIFY_PIDS=""
 RUN_START=""
 BURN_DONE=0
 S_TEMP=""; S_FAN=""; S_SPEED=""; S_PROCHOT=""; S_BATT=""; S_AC=""; S_BTEMP=""
@@ -892,57 +896,114 @@ manual_checks() {
 # --- 3. SSD test ---------------------------------------------------------------
 drop_cache() { [ "$HAVE_SUDO" = 1 ] && sudo -n purge >/dev/null 2>&1; }
 
-ssd_verify() {
-  local i=0 bad=0
-  while [ "$i" -lt "$SSD_CHUNKS" ]; do
-    dd if="$SSD_FILE" bs=1048576 skip=$((i * 256)) count=256 2>/dev/null | cmp -s "$WORK/chunk.bin" - || bad=$((bad + 1))
-    i=$((i + 1))
+# The data check reads the test file in blocks of 256 MB. Each block must have
+# the same checksum as the random block that was written (SSD_REF). Several
+# workers check blocks in parallel, so the check runs at SSD speed.
+ssd_verify_start() { # JOBS
+  local jobs="$1" j=0
+  rm -f "$WORK"/verify.*
+  : > "$WORK/verify.progress"
+  VERIFY_PIDS=""
+  while [ "$j" -lt "$jobs" ]; do
+    (
+      i=$j; b=0
+      while [ "$i" -lt "$SSD_CHUNKS" ]; do
+        s="$(dd if="$SSD_FILE" bs=1048576 skip=$((i * 256)) count=256 2>/dev/null | cksum)"
+        [ "$s" = "$SSD_REF" ] || b=$((b + 1))
+        echo "$i" >> "$WORK/verify.progress"
+        i=$((i + jobs))
+      done
+      echo "$b" > "$WORK/verify.bad.$j"
+    ) &
+    VERIFY_PIDS="$VERIFY_PIDS $!"
+    j=$((j + 1))
   done
-  printf '%s' "$bad"
+}
+ssd_verify_running() { local p; for p in $VERIFY_PIDS; do kill -0 "$p" 2>/dev/null && return 0; done; return 1; }
+ssd_verify_gb() { local n; n="$(wc -l < "$WORK/verify.progress" 2>/dev/null | tr -d ' ')"; is_int "$n" || n=0; printf '%s' $(( n / 4 )); }
+ssd_verify_stop() { local p; for p in $VERIFY_PIDS; do kill "$p" 2>/dev/null; done; VERIFY_PIDS=""; }
+ssd_verify_collect() { # sets SSD_BAD and SSD_UNCHECKED (blocks)
+  local p f b n
+  for p in $VERIFY_PIDS; do wait "$p" 2>/dev/null; done
+  VERIFY_PIDS=""
+  SSD_BAD=0
+  for f in "$WORK"/verify.bad.*; do
+    [ -f "$f" ] || continue
+    read -r b < "$f"
+    is_int "$b" && SSD_BAD=$((SSD_BAD + b))
+  done
+  n="$(wc -l < "$WORK/verify.progress" 2>/dev/null | tr -d ' ')"; is_int "$n" || n=0
+  SSD_UNCHECKED=$(( SSD_CHUNKS - n ))
+  [ "$SSD_UNCHECKED" -ge 0 ] || SSD_UNCHECKED=0
+}
+ssd_verify_fg() { # JOBS: check with progress on screen
+  ssd_verify_start "$1"
+  while ssd_verify_running; do
+    printf '\r  Checking: %s of %s GB%s' "$(ssd_verify_gb)" "$(( SSD_CHUNKS / 4 ))" "$CLR"
+    sleep 1
+  done
+  printf '\r  Checking: %s of %s GB%s\n' "$(ssd_verify_gb)" "$(( SSD_CHUNKS / 4 ))" "$CLR"
+  ssd_verify_collect
 }
 
 ssd_test() {
-  local gb="$SSD_GB" free_kb t0 t1 wrc rrc mb w_mbs r_mbs bad i
+  local gb="$SSD_GB" free_kb free_gb t0 t1 wrc rrc mb rd_mb w_mbs r_mbs i jobs
   step "SSD write and read test"
   free_kb="$(df -k "$WORK" 2>/dev/null | awk 'NR == 2 { print $4 }')"
-  if is_int "$free_kb" && [ "$free_kb" -lt $(( (gb + 5) * 1048576 )) ]; then
-    gb=$(( free_kb / 1048576 - 5 ))
-    if [ "$gb" -lt 1 ]; then record SKIP "Storage" "SSD write and read test" "Not enough free space"; return; fi
-    warnmsg "Low free space: the test uses $gb GB."
+  if is_int "$free_kb"; then
+    free_gb=$(( free_kb / 1048576 ))
+    if [ "$gb" -gt $(( free_gb / 2 )) ]; then
+      gb=$(( free_gb / 2 ))
+      if [ "$gb" -lt 1 ]; then record SKIP "Storage" "SSD write and read test" "Not enough free space ($free_gb GB)"; return; fi
+      warnmsg "The test uses $gb GB: half of the free space ($free_gb GB)."
+    fi
   fi
   SSD_CHUNKS=$(( gb * 4 ))
   SSD_FILE="$WORK/ssd-test.bin"
   mb=$(( SSD_CHUNKS * 256 ))
-  msg "Writes $gb GB of random data, reads it back and compares it (about 1 to 3 minutes)."
+  jobs="$NCPU"; [ "$jobs" -gt 8 ] && jobs=8; [ "$jobs" -lt 2 ] && jobs=2
+  msg "Writes $gb GB of random data, reads it back and compares it. The progress shows below."
   if ! dd if=/dev/urandom of="$WORK/chunk.bin" bs=1048576 count=256 2>/dev/null; then
     record FAIL "Storage" "SSD write and read test" "Could not make the test data"; return
   fi
+  SSD_REF="$(cksum < "$WORK/chunk.bin")"
+  : > "$SSD_FILE"
   t0="$(now)"
-  i=0
-  while [ "$i" -lt "$SSD_CHUNKS" ]; do cat "$WORK/chunk.bin"; i=$((i + 1)); done > "$SSD_FILE" 2>"$WORK/ssd-write.err"
-  wrc=$?
+  i=0; wrc=0
+  while [ "$i" -lt "$SSD_CHUNKS" ]; do
+    if ! cat "$WORK/chunk.bin" >> "$SSD_FILE" 2>"$WORK/ssd-write.err"; then wrc=1; break; fi
+    i=$((i + 1))
+    [ $(( i % 4 )) -eq 0 ] && printf '\r  Writing: %s of %s GB%s' "$(( i / 4 ))" "$gb" "$CLR"
+  done
+  printf '\n'
   sync
   t1="$(now)"
+  rm -f "$WORK/chunk.bin"
   if [ $wrc -ne 0 ]; then
-    record FAIL "Storage" "SSD write" "Write error: $(head -c 200 "$WORK/ssd-write.err")"
+    record FAIL "Storage" "SSD write" "Write error after $(( i / 4 )) GB: $(head -c 200 "$WORK/ssd-write.err")"
     rm -f "$SSD_FILE"; SSD_FILE=""; return
   fi
   w_mbs="$(mbps "$mb" "$t0" "$t1")"
+  note "  Clearing the disk cache..."
   drop_cache
+  rd_mb="$mb"; [ "$rd_mb" -gt 8192 ] && rd_mb=8192
+  note "  Measuring the read speed on $(( rd_mb / 1024 )) GB..."
   t0="$(now)"
-  dd if="$SSD_FILE" of=/dev/null bs=4194304 2>"$WORK/ssd-read.err"
+  dd if="$SSD_FILE" of=/dev/null bs=4194304 count=$(( rd_mb / 4 )) 2>"$WORK/ssd-read.err"
   rrc=$?
   t1="$(now)"
-  r_mbs="$(mbps "$mb" "$t0" "$t1")"
+  r_mbs="$(mbps "$rd_mb" "$t0" "$t1")"
   if [ $rrc -ne 0 ]; then
     record FAIL "Storage" "SSD read" "Read error: $(head -c 200 "$WORK/ssd-read.err")"
   fi
   drop_cache
-  bad="$(ssd_verify)"
-  if [ "$bad" -eq 0 ]; then
-    record PASS "Storage" "SSD data check" "$gb GB written and read back with no errors"
+  ssd_verify_fg "$jobs"
+  if [ "$SSD_BAD" -gt 0 ]; then
+    record FAIL "Storage" "SSD data check" "$SSD_BAD of $SSD_CHUNKS blocks of 256 MB came back different. The SSD corrupts data."
+  elif [ "$SSD_UNCHECKED" -gt 0 ]; then
+    record WARN "Storage" "SSD data check" "$SSD_UNCHECKED of $SSD_CHUNKS blocks were not checked"
   else
-    record FAIL "Storage" "SSD data check" "$bad of $SSD_CHUNKS blocks of 256 MB came back different. The SSD corrupts data."
+    record PASS "Storage" "SSD data check" "$gb GB written and read back with no errors"
   fi
   local sp="Write about $w_mbs MB/s, read about $r_mbs MB/s"
   [ "$HAVE_SUDO" = 1 ] || sp="$sp (cache not cleared: read speed can be too high)"
@@ -1061,8 +1122,8 @@ phase_stats() { # phase -> shell assignments
 }
 
 burnin() {
-  local total=$(( BURN_MIN * 60 )) t0 el=0 next_verify="$VERIFY_EVERY_SEC" verify_runs=0 verify_bad=0 bad line rc
-  local last_log=0 n_panic n_gpu n_ws alive
+  local total=$(( BURN_MIN * 60 )) t0 el=0 next_verify="$VERIFY_EVERY_SEC" verify_runs=0 verify_bad=0 line rc
+  local last_log=0 n_panic n_gpu n_ws alive reverify=0 vstat
   step "Burn-in ($(fmt_dur "$total"))"
   if ! on_ac; then
     warnmsg "The charger is not connected. Connect it now."
@@ -1086,9 +1147,11 @@ burnin() {
     el=$(( $(date +%s) - t0 ))
     write_sample burnin "$el"
     set_state burnin
-    printf '\r  %s / %s   CPU %s°C   fan %s rpm   speed limit %s%%   battery %s%% %s%s' \
+    vstat=""
+    [ "$reverify" = 1 ] && vstat="   SSD check $(ssd_verify_gb)/$(( SSD_CHUNKS / 4 )) GB"
+    printf '\r  %s / %s   CPU %s°C   fan %s rpm   speed limit %s%%   battery %s%% %s%s%s' \
       "$(fmt_dur "$el")" "$(fmt_dur "$total")" "${S_TEMP:-?}" "${S_FAN:-?}" "${S_SPEED:-?}" "${S_BATT:-?}" \
-      "$([ "$S_AC" = 1 ] && echo '(charger)' || echo '(BATTERY)')" "$CLR"
+      "$([ "$S_AC" = 1 ] && echo '(charger)' || echo '(BATTERY)')" "$vstat" "$CLR"
     if [ $(( el - last_log )) -ge 600 ]; then
       logmsg "burn-in $(fmt_dur "$el"): cpu ${S_TEMP}C fan ${S_FAN} speed ${S_SPEED}% batt ${S_BATT}% ac ${S_AC}"
       last_log=$el
@@ -1097,15 +1160,20 @@ burnin() {
       printf '\n'
       finish_fullread
     fi
-    if [ "$el" -ge "$next_verify" ] && [ -n "$SSD_FILE" ] && [ -f "$SSD_FILE" ]; then
-      printf '\n'
-      note "  Reading the SSD test data again..."
+    # Read the SSD test data again in the background, so the samples continue.
+    if [ "$reverify" = 0 ] && [ "$el" -ge "$next_verify" ] && [ -n "$SSD_FILE" ] && [ -f "$SSD_FILE" ]; then
       drop_cache
-      bad="$(ssd_verify)"
+      ssd_verify_start 2
+      reverify=1
+      logmsg "SSD re-check started"
+    fi
+    if [ "$reverify" = 1 ] && ! ssd_verify_running; then
+      ssd_verify_collect
+      reverify=0
       verify_runs=$((verify_runs + 1))
-      verify_bad=$((verify_bad + bad))
-      logmsg "SSD re-check $verify_runs: $bad bad blocks"
-      next_verify=$((next_verify + VERIFY_EVERY_SEC))
+      verify_bad=$((verify_bad + SSD_BAD))
+      logmsg "SSD re-check $verify_runs: $SSD_BAD bad blocks, $SSD_UNCHECKED not checked"
+      next_verify=$((el + VERIFY_EVERY_SEC))
     fi
     [ $(( total - el )) -le 0 ] && break
     if [ -t 0 ]; then
@@ -1122,6 +1190,20 @@ burnin() {
   IN_BURNIN=0
   BURN_DONE=1
   printf '\n'
+  if [ "$reverify" = 1 ]; then
+    if [ "$STOP_REQUESTED" = 1 ]; then
+      ssd_verify_stop
+    else
+      while ssd_verify_running; do
+        printf '\r  Finishing the SSD check: %s of %s GB%s' "$(ssd_verify_gb)" "$(( SSD_CHUNKS / 4 ))" "$CLR"
+        sleep 1
+      done
+      printf '\n'
+      ssd_verify_collect
+      verify_runs=$((verify_runs + 1))
+      verify_bad=$((verify_bad + SSD_BAD))
+    fi
+  fi
 
   # Results
   eval "$(phase_stats burnin)"
@@ -1458,6 +1540,7 @@ cleanup() {
   [ "$CLEANED" = 1 ] && return
   CLEANED=1
   stop_load
+  ssd_verify_stop
   if [ -n "$FULLREAD_PID" ]; then
     kill "$FULLREAD_PID" 2>/dev/null
     [ "$HAVE_SUDO" = 1 ] && sudo -n pkill -f "of=/dev/null bs=4194304" >/dev/null 2>&1

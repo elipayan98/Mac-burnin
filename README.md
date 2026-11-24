@@ -104,7 +104,8 @@ with the last battery %, the macOS shutdown cause code and the kernel panic text
   some logic board faults) can pass today and fail next week.
 - It cannot see liquid damage, cosmetic damage, or a bad screen coating. You must look.
 - It cannot test RAM directly. Use Apple Diagnostics (hold **D**) for that.
-- The script does not wear the SSD much: it writes 8 GB one time. During the burn-in it only reads.
+- The script does not wear the SSD much: it writes 8 GB one time (or the `--ssd-gb` size, at most half of the
+  free space). During the burn-in it only reads. A 64 GB test takes about 2 to 5 minutes; the screen shows the progress.
 - Long burn-ins put heat on the battery. Each run-down uses about one battery cycle, and the stress run-down
   also adds heat. Use them for batteries you doubt (high cycle count, health below about 85 %), not on every Mac.
 - MacBook Air 2018–2020 and MacBook 12-inch throttle under full load by design. The script does not mark that as a fault.
