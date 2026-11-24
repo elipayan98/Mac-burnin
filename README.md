@@ -70,11 +70,16 @@ Select a test plan:
   1  Full test: checks, hands-on tests, SSD test, 4-hour burn-in (recommended)
   2  Quick test: checks, hands-on tests, SSD test, 30-minute burn-in
   3  Unattended: checks, SSD test, 4-hour burn-in, no questions
-  4  Heavy SSD and battery: checks, 64 GB SSD test, 1-hour burn-in, battery stress test to 10%
-  5  Checks and hands-on tests only (no burn-in)
-  6  Custom: select each test
+  4  Heavy SSD and battery: checks, 64 GB SSD test, 1-hour burn-in, then battery stress test to 10%
+  5  Battery stress test only: checks, SSD test, then battery stress test to 10% (no burn-in)
+  6  Checks and hands-on tests only (no burn-in)
+  7  Custom: select each test
   q  Quit
 ```
+
+**Battery plans (4 and 5):** keep the charger connected until the script asks you to disconnect it.
+In plan 4 the burn-in runs on the charger first (1 hour); then the script beeps and asks.
+In plan 5 the script asks after the SSD test (a few minutes). Charge the battery to 100% before you start plan 5.
 
 **Custom** asks for each setting: hands-on tests yes or no, burn-in minutes, SSD test size, and the battery test.
 Before the test starts, the script shows the plan and the same plan as a command (for the options below).
@@ -117,6 +122,8 @@ It then marks the battery FAIL in the report.
 
 Run the script again. It finds the test that did not finish. It adds a FAIL to that report
 with the last battery %, the macOS shutdown cause code and the kernel panic text (if there is one).
+If the Mac was on battery and the battery was almost empty (5% or less), the report shows a WARN
+"Battery ran empty" instead: that is not a fault. On battery at a higher %, the report marks the battery FAIL.
 
 ## Limits
 
