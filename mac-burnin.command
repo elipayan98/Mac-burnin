@@ -26,6 +26,11 @@
 #    3. Type  bash  and a space. Drag this file into the Terminal window.
 #       Push Return.
 #    4. Type the admin password when the script asks for it.
+#    (You can also double-click this file.)
+#
+#  MENU
+#    With no options, the script shows a menu of test plans. Type a number.
+#    With options, the script starts at once with those options.
 #
 #  OPTIONS
 #    --hours N              Burn-in time in hours (default 4)
@@ -126,8 +131,14 @@ Usage: bash mac-burnin.command [options]
   --battery-stress [P]   Same, but with full CPU and GPU load. This finds weak
                          batteries that shut down early under heavy current.
   --help                 Show this text
+
+Without options, the script shows a menu of test plans.
 EOF
 }
+
+# With no options in a Terminal window, show the start menu.
+SHOW_MENU=0
+if [ $# -eq 0 ] && [ -t 0 ] && [ -t 1 ]; then SHOW_MENU=1; fi
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -261,6 +272,95 @@ ask_yn() {
 }
 
 ask_text() { local a; printf '%s > ' "$1" >&2; read -r a || a=""; printf '%s' "$a"; }
+
+# ask_num QUESTION DEFAULT MIN MAX -> number (Return = default)
+ask_num() {
+  local a
+  while :; do
+    printf '%s [%s] > ' "$1" "$2" >&2
+    read -r a || { printf '%s' "$2"; return; }
+    [ -z "$a" ] && a="$2"
+    if is_int "$a" && [ "$a" -ge "$3" ] && [ "$a" -le "$4" ]; then printf '%s' "$a"; return; fi
+    printf '  Type a number from %s to %s.\n' "$3" "$4" >&2
+  done
+}
+
+# --- Start menu ----------------------------------------------------------------
+plan_text() {
+  local p=""
+  [ "$AUTO" = 0 ] && p="hands-on tests, "
+  p="${p}SSD test ($SSD_GB GB)"
+  [ "$SKIP_BURNIN" = 0 ] && p="$p, $(fmt_dur $(( BURN_MIN * 60 ))) burn-in"
+  if [ "$RUNDOWN" = 1 ] && [ "$RUNDOWN_FULL" = 1 ]; then
+    p="$p, battery stress run-down at full load to $RUNDOWN_PCT%"
+  elif [ "$RUNDOWN" = 1 ]; then
+    p="$p, battery run-down to $RUNDOWN_PCT%"
+  fi
+  printf '%s' "$p"
+}
+
+plan_args() {
+  local a=""
+  [ "$AUTO" = 1 ] && a="$a --auto"
+  if [ "$SKIP_BURNIN" = 1 ]; then a="$a --skip-burnin"
+  elif [ $(( BURN_MIN % 60 )) -eq 0 ]; then a="$a --hours $(( BURN_MIN / 60 ))"
+  else a="$a --minutes $BURN_MIN"; fi
+  [ "$SSD_GB" != 8 ] && a="$a --ssd-gb $SSD_GB"
+  if [ "$RUNDOWN" = 1 ] && [ "$RUNDOWN_FULL" = 1 ]; then a="$a --battery-stress $RUNDOWN_PCT"
+  elif [ "$RUNDOWN" = 1 ]; then a="$a --battery-rundown $RUNDOWN_PCT"; fi
+  printf '%s' "$a"
+}
+
+custom_menu() {
+  local m b
+  printf '\n'
+  if ask_yn "Do the hands-on tests (screen, keyboard, trackpad, speakers, camera, ports)?" y; then AUTO=0; else AUTO=1; fi
+  m="$(ask_num "Burn-in time in minutes (0 = no burn-in, 240 = 4 hours, 1440 = 1 day)" 240 0 10080)"
+  if [ "$m" = 0 ]; then SKIP_BURNIN=1; else SKIP_BURNIN=0; BURN_MIN="$m"; fi
+  SSD_GB="$(ask_num "SSD test size in GB (8 = normal, 64 = heavy)" 8 1 1024)"
+  printf '%s\n' "Battery test after the burn-in:" \
+    "  0  None" \
+    "  1  Light run-down (2 CPU threads)" \
+    "  2  Stress run-down (full CPU and GPU load, finds weak batteries)"
+  b="$(ask_num "Battery test" 0 0 2)"
+  case "$b" in
+    1) RUNDOWN=1; RUNDOWN_FULL=0; RUNDOWN_PCT="$(ask_num "Stop the battery test at what percent?" 30 5 90)";;
+    2) RUNDOWN=1; RUNDOWN_FULL=1; RUNDOWN_PCT="$(ask_num "Stop the battery test at what percent?" 10 5 90)";;
+    *) RUNDOWN=0;;
+  esac
+}
+
+start_menu() {
+  local c
+  while :; do
+    AUTO=0; SKIP_BURNIN=0; BURN_MIN=240; SSD_GB=8; RUNDOWN=0; RUNDOWN_FULL=0; RUNDOWN_PCT=30
+    printf '\n%sSelect a test plan:%s\n' "$BOLD" "$RST"
+    printf '  1  Full test: checks, hands-on tests, SSD test, 4-hour burn-in (recommended)\n'
+    printf '  2  Quick test: checks, hands-on tests, SSD test, 30-minute burn-in\n'
+    printf '  3  Unattended: checks, SSD test, 4-hour burn-in, no questions\n'
+    printf '  4  Heavy SSD and battery: checks, 64 GB SSD test, 1-hour burn-in, battery stress test to 10%%\n'
+    printf '  5  Checks and hands-on tests only (no burn-in)\n'
+    printf '  6  Custom: select each test\n'
+    printf '  q  Quit\n'
+    printf 'Type a number and push Return [1] > '
+    read -r c || c=q
+    [ -z "$c" ] && c=1
+    case "$c" in
+      1) ;;
+      2) BURN_MIN=30;;
+      3) AUTO=1;;
+      4) AUTO=1; BURN_MIN=60; SSD_GB=64; RUNDOWN=1; RUNDOWN_FULL=1; RUNDOWN_PCT=10;;
+      5) SKIP_BURNIN=1;;
+      6) custom_menu;;
+      q|Q) echo "No test started."; exit 0;;
+      *) echo "  Type a number from 1 to 6, or q."; continue;;
+    esac
+    printf '\n%sPlan:%s automatic checks, %s.\n' "$BOLD" "$RST" "$(plan_text)"
+    [ "$RUNDOWN" = 1 ] && printf '  For the battery test, disconnect the charger when the script asks (after the burn-in).\n'
+    printf '%sSame as the command: bash mac-burnin.command%s%s\n' "$DIM" "$(plan_args)" "$RST"
+    if ask_yn "Start this test?" y; then return 0; fi
+  done
+}
 
 ask_int() {
   local a
@@ -1412,7 +1512,7 @@ check_previous_run() {
   rm -f "$STATE_FILE"
   msg "The report for that test is updated: $ST_RUN_DIR/report.html"
   RESULTS=""; LOG="/dev/null"; RUN_DIR=""
-  if [ "$AUTO" = 0 ] && ! ask_yn "Start a new test now?" y; then exit 0; fi
+  if [ "$AUTO" = 0 ] && [ "$SHOW_MENU" = 0 ] && ! ask_yn "Start a new test now?" y; then exit 0; fi
 }
 
 # --- 5. Report -----------------------------------------------------------------
@@ -2041,6 +2141,7 @@ main() {
   if [ "$(uname -m)" != "x86_64" ] || [ "$(sysctl -n sysctl.proc_translated 2>/dev/null)" = 1 ]; then
     warnmsg "This script is for Intel Macs. On this Mac, some checks will not work."
   fi
+  [ "$SHOW_MENU" = 1 ] && start_menu
 
   STATE_DIR="$HOME/Library/Application Support/MacBurnIn"
   mkdir -p "$STATE_DIR" 2>/dev/null
@@ -2076,15 +2177,8 @@ main() {
   echo "time,elapsed_s,phase,cpu_temp_c,fan_rpm,cpu_speed_limit_pct,prochots,battery_pct,on_ac,battery_temp_c,load_workers" > "$CSV"
   touch "$RUN_DIR/.start"
 
-  local plan=""
-  [ "$AUTO" = 0 ] && plan="hands-on tests, "
-  plan="${plan}SSD test"
-  [ "$SKIP_BURNIN" = 0 ] && plan="$plan, $(fmt_dur $((BURN_MIN * 60))) burn-in"
-  if [ "$RUNDOWN" = 1 ] && [ "$RUNDOWN_FULL" = 1 ]; then
-    plan="$plan, battery stress run-down at full load to $RUNDOWN_PCT%"
-  elif [ "$RUNDOWN" = 1 ]; then
-    plan="$plan, battery run-down to $RUNDOWN_PCT%"
-  fi
+  local plan
+  plan="$(plan_text)"
   BURN_PLAN="$plan"
   save_device
   set_state checks

@@ -51,7 +51,7 @@ Do not download `mac-burnin.command` alone in a browser. The browser removes its
    If macOS says it cannot verify the developer (only for a downloaded file):
    - macOS 15 Sequoia or later: click **Done**. Open **System Settings > Privacy & Security**. Scroll down. Click **Open Anyway**. Type the password.
    - macOS 12 to 14: Control-click the file, click **Open**, then click **Open** again.
-5. Type the admin password when the script asks for it.
+5. Select a test plan in the menu (type a number, push Return). Then type the admin password.
 6. Do the hands-on tests (about 15 minutes). Follow the prompts.
 7. Leave the Mac for the burn-in (default 4 hours). Keep the lid open.
 8. Come back. Answer the last question about the GPU page.
@@ -61,10 +61,30 @@ Do not download `mac-burnin.command` alone in a browser. The browser removes its
 Reports go to `~/Desktop/MacBurnIn/<serial>_<date>/`. When the script runs from a USB stick,
 it also saves a copy in `MacBurnIn-reports` on the stick. Thus one stick collects the reports for all your Macs.
 
-## Options
+## Menu
+
+When you start the script with no options (also with a double-click), it shows this menu:
 
 ```
-bash mac-burnin.command                     # full test, 4 h burn-in
+Select a test plan:
+  1  Full test: checks, hands-on tests, SSD test, 4-hour burn-in (recommended)
+  2  Quick test: checks, hands-on tests, SSD test, 30-minute burn-in
+  3  Unattended: checks, SSD test, 4-hour burn-in, no questions
+  4  Heavy SSD and battery: checks, 64 GB SSD test, 1-hour burn-in, battery stress test to 10%
+  5  Checks and hands-on tests only (no burn-in)
+  6  Custom: select each test
+  q  Quit
+```
+
+**Custom** asks for each setting: hands-on tests yes or no, burn-in minutes, SSD test size, and the battery test.
+Before the test starts, the script shows the plan and the same plan as a command (for the options below).
+
+## Options
+
+With options, the script starts at once and shows no menu.
+
+```
+bash mac-burnin.command                     # no options: shows the menu
 bash mac-burnin.command --hours 24          # 1-day burn-in
 bash mac-burnin.command --minutes 30        # short burn-in
 bash mac-burnin.command --auto              # no questions: automatic checks + SSD + burn-in
