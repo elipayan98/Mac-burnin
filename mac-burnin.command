@@ -1857,7 +1857,8 @@ button { background:#333; color:#fff; border:0; border-radius:8px; padding:7px 1
 <script>
 (function () {
   'use strict';
-  var CFG = { mode: '__MODE__', mins: parseFloat('__MINS__'), stop: '__STOP__' };
+  var CFG = { mode: '__MODE__', mins: parseFloat('__MINS__'), stop: '__STOP__', gpu: '__GPU__', heavy: '__HEAVY__' === '1' };
+  if (CFG.gpu.indexOf('__') === 0) { CFG.gpu = ''; }
   if (CFG.mode.indexOf('__') === 0) { CFG.mode = (location.hash || '#menu').slice(1); }
   if (!(CFG.mins >= 0)) { CFG.mins = 0; }
   if (CFG.stop.indexOf('__') === 0) { CFG.stop = ''; }
@@ -2133,8 +2134,14 @@ button { background:#333; color:#fff; border:0; border-radius:8px; padding:7px 1
     gl.enableVertexAttribArray(loc);
     gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
     var uR = gl.getUniformLocation(prog, 'r'), uT = gl.getUniformLocation(prog, 't'), uN = gl.getUniformLocation(prog, 'n');
-    var gpuName = '';
-    try { var ext = gl.getExtension('WEBGL_debug_renderer_info'); if (ext) { gpuName = gl.getParameter(ext.UNMASKED_RENDERER_WEBGL); } } catch (e2) {}
+    // Safari hides the real GPU name ("Apple GPU"), so use the names macOS reports (from the script).
+    var gpuName = CFG.gpu;
+    if (!gpuName) {
+      try { var ext = gl.getExtension('WEBGL_debug_renderer_info'); if (ext) { gpuName = gl.getParameter(ext.UNMASKED_RENDERER_WEBGL); } } catch (e2) {}
+      if (/^Apple GPU$/i.test(gpuName)) { gpuName = ''; }
+    }
+    // Heavy mode (drain): 4 blended passes per frame and longer frames, so the GPU has more work.
+    var passes = CFG.heavy ? 4 : 1, fastMs = CFG.heavy ? 60 : 34, slowMs = CFG.heavy ? 120 : 70;
     document.addEventListener('visibilitychange', function () { last = 0; });
     function resize() {
       var d = window.devicePixelRatio || 1;
@@ -2143,9 +2150,10 @@ button { background:#333; color:#fff; border:0; border-radius:8px; padding:7px 1
     }
     function drawInfo(now) {
       info.textContent = 'GPU stress test\n' +
-        'Time:   ' + mins(now - started) + (endMs ? ' of ' + mins(endMs) : '') + '\n' +
+        'Time:   ' + mins(now - started) + (endMs && CFG.mins < 600 ? ' of ' + mins(endMs) : (CFG.stop ? ' (stops when the test ends)' : '')) + '\n' +
         'FPS:    ' + fps.toFixed(1) + '   load level: ' + iters + '\n' +
-        'Frames: ' + frames + (gpuName ? '\nGPU:    ' + gpuName : '') + '\n' +
+        'Frames: ' + frames + (CFG.heavy ? '   heavy mode: ' + passes + ' passes per frame' : '') +
+        (gpuName ? '\n' + (gpuName.indexOf(',') > 0 ? 'GPUs:   ' : 'GPU:    ') + gpuName : '') + '\n' +
         (document.hidden ? 'PAUSED: the page is hidden\n' : '') +
         'Keep this window visible. It stops by itself.\nClick for full screen.';
     }
@@ -2155,17 +2163,26 @@ button { background:#333; color:#fff; border:0; border-radius:8px; padding:7px 1
         var dt = now - last;
         if (dt > maxGap && !document.hidden) { maxGap = dt; }
         if (frames > 20) {
-          if (dt < 34) { iters = Math.min(1000, Math.ceil(iters * 1.06)); }
-          else if (dt > 70) { iters = Math.max(8, Math.floor(iters * 0.85)); }
+          if (dt < fastMs) { iters = Math.min(1000, Math.ceil(iters * 1.06)); }
+          else if (dt > slowMs) { iters = Math.max(8, Math.floor(iters * 0.85)); }
         }
       }
       last = now;
       resize();
       gl.viewport(0, 0, cv.width, cv.height);
       gl.uniform2f(uR, cv.width, cv.height);
-      gl.uniform1f(uT, (now - started) / 1000);
       gl.uniform1i(uN, iters);
-      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      for (var k = 0; k < passes; k++) {
+        // Pass 1 draws; each next pass is mixed in at 1/(k+1), so the picture is the average of all passes.
+        if (k === 0) { gl.disable(gl.BLEND); }
+        else {
+          gl.enable(gl.BLEND);
+          gl.blendColor(0, 0, 0, 1 / (k + 1));
+          gl.blendFunc(gl.CONSTANT_ALPHA, gl.ONE_MINUS_CONSTANT_ALPHA);
+        }
+        gl.uniform1f(uT, (now - started) / 1000 + k * 0.04);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+      }
       frames++;
       fpsN++;
       if (now - fpsT >= 1000) { fps = fpsN * 1000 / (now - fpsT); fpsN = 0; fpsT = now; drawInfo(now); }
@@ -2209,14 +2226,19 @@ button { background:#333; color:#fff; border:0; border-radius:8px; padding:7px 1
 </body>
 </html>
 HTML_EOF
-  local m
+  local m gpus heavy=0
+  # Real GPU names from macOS (Safari only says "Apple GPU"). Keep safe characters only.
+  gpus="$(system_profiler SPDisplaysDataType 2>/dev/null | awk -F': ' '/Chipset Model:/ { printf "%s%s", (n++ ? ", " : ""), $2 }' | tr -cd 'A-Za-z0-9 ,.()+-')"
+  [ "$DRAIN" = 1 ] && heavy=1
   for m in screen keys; do
-    sed -e "s/__MODE__/$m/" -e "s/__MINS__/$BURN_MIN/" -e "s/__STOP__//" "$WORK/page.tpl" > "$WORK/$m.html"
+    sed -e "s/__MODE__/$m/" -e "s/__MINS__/$BURN_MIN/" -e "s/__STOP__//" -e "s/__GPU__//" -e "s/__HEAVY__/0/" "$WORK/page.tpl" > "$WORK/$m.html"
   done
   # Burn-in GPU page: own timer plus the stop file.
-  sed -e "s/__MODE__/gpu/" -e "s/__MINS__/$BURN_MIN/" -e "s/__STOP__/stop-gpu.js/" "$WORK/page.tpl" > "$WORK/gpu.html"
-  # Battery stress GPU page: stops on the stop file, or after 10 hours at most.
-  sed -e "s/__MODE__/gpu/" -e "s/__MINS__/600/" -e "s/__STOP__/stop-gpu-rundown.js/" "$WORK/page.tpl" > "$WORK/gpu-rundown.html"
+  sed -e "s/__MODE__/gpu/" -e "s/__MINS__/$BURN_MIN/" -e "s/__STOP__/stop-gpu.js/" -e "s/__GPU__/$gpus/" -e "s/__HEAVY__/0/" \
+    "$WORK/page.tpl" > "$WORK/gpu.html"
+  # Battery GPU page: stops on the stop file, or after 10 hours at most. Heavy in drain mode.
+  sed -e "s/__MODE__/gpu/" -e "s/__MINS__/600/" -e "s/__STOP__/stop-gpu-rundown.js/" -e "s/__GPU__/$gpus/" -e "s/__HEAVY__/$heavy/" \
+    "$WORK/page.tpl" > "$WORK/gpu-rundown.html"
   rm -f "$WORK/page.tpl" "$WORK"/stop-*.js
 }
 
